@@ -20,7 +20,7 @@
 //#define TFT_MISO    19  // "For some reason DMA requires that a MISO pin is defined" - https://github.com/Bodmer/TFT_eSPI/discussions/2233
 
 
-//#define TFT_MISO 19
+#define TFT_MISO -1
 #define TFT_MOSI 17 	// aka SDA
 #define TFT_SCLK 18 	// aka SCL
 #define TFT_CS 16 	// Chip select control pin
@@ -46,8 +46,6 @@
 #define LOAD_GFXFF    // FreeFonts. Include access to the 48 Adafruit_GFX free fonts FF1 to FF48 and custom fonts
 
 #define SMOOTH_FONT
-
-#define USE_FSPI_PORT
 
 #define SPI_FREQUENCY         10000000
 #define SPI_READ_FREQUENCY    20000000
