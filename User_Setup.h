@@ -8,7 +8,9 @@
 #define TFT_RGB_ORDER TFT_RGB
 
 #define TFT_WIDTH   240
-#define TFT_HEIGHT  340
+#define TFT_HEIGHT  240
+#define CGRAM_OFFSET
+#define TFT_SPI_MODE SPI_MODE0
 
 //#define TFT_MOSI    21  // aka SDA
 //#define TFT_SCLK    22  // aka SCL
@@ -19,11 +21,11 @@
 
 
 //#define TFT_MISO 19
-#define TFT_MOSI 23 	// aka SDA
+#define TFT_MOSI 17 	// aka SDA
 #define TFT_SCLK 18 	// aka SCL
-#define TFT_CS 22 	// Chip select control pin
-#define TFT_DC 21 	// Data Command control pin
-#define TFT_RST 12 	// Reset pin (could connect to RST pin)
+#define TFT_CS 16 	// Chip select control pin
+#define TFT_DC 15 	// Data Command control pin
+#define TFT_RST 4 	// Dedicated reset pin for breadboard wiring
 
 
 
@@ -45,6 +47,6 @@
 
 #define SMOOTH_FONT
 
-#define SPI_FREQUENCY         27000000
+#define SPI_FREQUENCY         10000000
 #define SPI_READ_FREQUENCY    20000000
 #define SPI_TOUCH_FREQUENCY   2500000

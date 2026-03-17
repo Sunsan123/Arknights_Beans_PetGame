@@ -4,6 +4,9 @@
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <math.h>
+#ifdef ESP32
+#include <esp_arduino_version.h>
+#endif
 
 #include "ui.h"
 #include "ui_anim.h"
@@ -34,6 +37,28 @@ bool hatchTriggered = false;
 #define BUZZER_CH     5
 
 #define TFT_BRIGHTNESS_PIN 7
+#define TFT_BRIGHTNESS_CH  0
+
+#if defined(ESP_ARDUINO_VERSION) && (ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0))
+static constexpr uint8_t TFT_PWM_TARGET = TFT_BRIGHTNESS_PIN;
+static constexpr uint8_t BUZZER_PWM_TARGET = BUZZER_PIN;
+
+void initPwmOutputs() {
+  ledcAttachChannel(TFT_BRIGHTNESS_PIN, 12000, 8, TFT_BRIGHTNESS_CH);
+  ledcAttachChannel(BUZZER_PIN, 4000, 8, BUZZER_CH);
+}
+#else
+static constexpr uint8_t TFT_PWM_TARGET = TFT_BRIGHTNESS_CH;
+static constexpr uint8_t BUZZER_PWM_TARGET = BUZZER_CH;
+
+void initPwmOutputs() {
+  ledcSetup(TFT_BRIGHTNESS_CH, 12000, 8);
+  ledcAttachPin(TFT_BRIGHTNESS_PIN, TFT_BRIGHTNESS_CH);
+
+  ledcSetup(BUZZER_CH, 4000, 8);
+  ledcAttachPin(BUZZER_PIN, BUZZER_CH);
+}
+#endif
 
 // TFT sizes
 #define TFT_W 240
@@ -69,6 +94,8 @@ int       hungerEffectFrame  = 0;
 bool      wifiScanInProgress = false;
 unsigned long lastWifiScanTime = 0;
 unsigned long lastSaveTime     = 0;
+unsigned long screenEnteredAt  = 0;
+Screen        lastScreenSeen   = SCREEN_BOOT;
 
 bool      soundEnabled     = true;
 bool      neoPixelsEnabled = true;
@@ -207,14 +234,14 @@ void ledsRest() {
 void stopBuzzerIfNeeded() {
   if (buzzerEndTime == 0) return;
   if (millis() > buzzerEndTime) {
-    ledcWriteTone(BUZZER_CH, 0);
+    ledcWriteTone(BUZZER_PWM_TARGET, 0);
     buzzerEndTime = 0;
   }
 }
 
 void buzzerPlay(int freq, int durMs) {
   if (!soundEnabled) return;
-  ledcWriteTone(BUZZER_CH, freq);
+  ledcWriteTone(BUZZER_PWM_TARGET, freq);
   buzzerEndTime = millis() + durMs;
 }
 
@@ -260,7 +287,7 @@ RetroSound SND_HATCH = { HATCH_FREQS, HATCH_TIMES, 5 };
 
 void sndUpdate() {
   if (!soundEnabled) {
-    ledcWriteTone(BUZZER_CH, 0);
+    ledcWriteTone(BUZZER_PWM_TARGET, 0);
     sndIndex = -1;
     sndStep = 0;
     return;
@@ -284,13 +311,13 @@ void sndUpdate() {
     }
 
     if (sndStep >= snd->length) {
-      ledcWriteTone(BUZZER_CH, 0);
+      ledcWriteTone(BUZZER_PWM_TARGET, 0);
       sndIndex = -1;
       sndStep = 0;
       return;
     }
 
-    ledcWriteTone(BUZZER_CH, snd->freqs[sndStep]);
+    ledcWriteTone(BUZZER_PWM_TARGET, snd->freqs[sndStep]);
     sndNext = now + snd->times[sndStep];
     sndStep++;
   }
@@ -304,12 +331,18 @@ void sndDiscover()    { if (!soundEnabled) return; sndIndex = 3; sndStep = 0; le
 void sndRestStart()   { if (!soundEnabled) return; sndIndex = 4; sndStep = 0; }
 void sndRestEnd()     { if (!soundEnabled) return; sndIndex = 5; sndStep = 0; }
 void sndHatch()       { if (!soundEnabled) return; sndIndex = 6; sndStep = 0; }
+void sndStop() {
+  ledcWriteTone(BUZZER_PWM_TARGET, 0);
+  sndIndex = -1;
+  sndStep = 0;
+  buzzerEndTime = 0;
+}
 
 // ---------- TFT brightness ----------
 void applyTftBrightness() {
   uint8_t val = (tftBrightnessIndex == 0) ? 60 :
                 (tftBrightnessIndex == 1) ? 150 : 255;
-  ledcWrite(0, val);
+  ledcWrite(TFT_PWM_TARGET, val);
 }
 
 // ---------- WiFi scan ----------
@@ -970,7 +1003,7 @@ void handleButtons() {
         case 2:
           soundEnabled = !soundEnabled;
           if (!soundEnabled) {
-            ledcWriteTone(BUZZER_CH, 0);
+            ledcWriteTone(BUZZER_PWM_TARGET, 0);
             buzzerEndTime = 0;
           }
           break;
@@ -1107,14 +1140,9 @@ void setup() {
   effectSprite.setColorDepth(16);
   effectSprite.createSprite(EFFECT_W, EFFECT_H);
 
-  // TFT backlight PWM
-  ledcSetup(0, 12000, 8);
-  ledcAttachPin(TFT_BRIGHTNESS_PIN, 0);
-
-  // Buzzer PWM
-  ledcSetup(BUZZER_CH, 4000, 8);
-  ledcAttachPin(BUZZER_PIN, BUZZER_CH);
-  ledcWriteTone(BUZZER_CH, 0);
+  // TFT backlight PWM + buzzer PWM
+  initPwmOutputs();
+  ledcWriteTone(BUZZER_PWM_TARGET, 0);
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
@@ -1137,6 +1165,8 @@ void setup() {
   lastDeadFrameTime   = now;
 
   currentScreen = SCREEN_BOOT;
+  screenEnteredAt = now;
+  lastScreenSeen = currentScreen;
   uiInit();
   uiOnScreenChange(currentScreen);
 
@@ -1145,6 +1175,11 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  if (currentScreen != lastScreenSeen) {
+    lastScreenSeen = currentScreen;
+    screenEnteredAt = now;
+  }
 
   sndUpdate();         
   
@@ -1161,6 +1196,17 @@ void loop() {
     if (currentScreen != SCREEN_BOOT && currentScreen != SCREEN_HATCH) {
       logicTick();
     }
+  }
+
+  // No buttons are connected on the breadboard build, so advance screens automatically.
+  if (currentScreen == SCREEN_BOOT && now - screenEnteredAt >= 1500) {
+    currentScreen = hasHatchedOnce ? SCREEN_HOME : SCREEN_HATCH;
+    uiOnScreenChange(currentScreen);
+  }
+
+  if (currentScreen == SCREEN_HATCH && !hasHatchedOnce && !hatchTriggered &&
+      now - screenEnteredAt >= 2000) {
+    hatchTriggered = true;
   }
 
   handleButtons();

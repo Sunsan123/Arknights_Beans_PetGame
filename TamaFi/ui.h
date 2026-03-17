@@ -5,9 +5,10 @@
 // ============ Enums & structs shared between UI and main ============
 
 void sndHatch();
+void sndStop();
 
-int petPosX = 120;
-int petPosY = 90;
+extern int petPosX;
+extern int petPosY;
 
 enum Screen {
   SCREEN_BOOT,
