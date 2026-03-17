@@ -1,146 +1,238 @@
 /*
- * TFT_eSPI Diagnostic Sketch for TamaFi
+ * TamaFi TFT Diagnostic v2
  * 
- * Upload this, then open Serial Monitor (115200 baud).
- * It will print all TFT_eSPI configuration info and test
- * the display step by step.
+ * Part A: Raw SPI test (bypasses TFT_eSPI entirely)
+ * Part B: TFT_eSPI test with detailed error info
+ * 
+ * Open Serial Monitor at 115200 baud.
  */
 
 #include <Arduino.h>
-#include <TFT_eSPI.h>
 #include <SPI.h>
 
-TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite fb(&tft);
+// ===== Hardware pins (matching User_Setup.h & DisplayTest_Mode3) =====
+#define PIN_SCLK 18
+#define PIN_MOSI 17
+#define PIN_CS   16
+#define PIN_DC   15
+#define PIN_RST  4
+
+SPIClass rawSpi(FSPI);
+SPISettings rawSpiSettings(10000000, MSBFIRST, SPI_MODE0);
+
+// ----- Raw ST7789 helpers -----
+void rawCmd(uint8_t cmd) {
+  digitalWrite(PIN_DC, LOW);
+  digitalWrite(PIN_CS, LOW);
+  rawSpi.beginTransaction(rawSpiSettings);
+  rawSpi.transfer(cmd);
+  rawSpi.endTransaction();
+  digitalWrite(PIN_CS, HIGH);
+}
+
+void rawData(const uint8_t *d, size_t len) {
+  digitalWrite(PIN_DC, HIGH);
+  digitalWrite(PIN_CS, LOW);
+  rawSpi.beginTransaction(rawSpiSettings);
+  for (size_t i = 0; i < len; i++) rawSpi.transfer(d[i]);
+  rawSpi.endTransaction();
+  digitalWrite(PIN_CS, HIGH);
+}
+
+void rawDataByte(uint8_t v) { rawData(&v, 1); }
+
+void rawSetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+  uint8_t buf[4];
+  rawCmd(0x2A);
+  buf[0]=x0>>8; buf[1]=x0; buf[2]=x1>>8; buf[3]=x1;
+  rawData(buf,4);
+  rawCmd(0x2B);
+  buf[0]=y0>>8; buf[1]=y0; buf[2]=y1>>8; buf[3]=y1;
+  rawData(buf,4);
+  rawCmd(0x2C);
+}
+
+void rawFill(uint16_t color) {
+  rawSetWindow(0, 0, 239, 239);
+  digitalWrite(PIN_DC, HIGH);
+  digitalWrite(PIN_CS, LOW);
+  rawSpi.beginTransaction(rawSpiSettings);
+  uint8_t hi = color >> 8, lo = color & 0xFF;
+  for (uint32_t i = 0; i < 240UL*240UL; i++) {
+    rawSpi.transfer(hi);
+    rawSpi.transfer(lo);
+  }
+  rawSpi.endTransaction();
+  digitalWrite(PIN_CS, HIGH);
+}
+
+void rawReset() {
+  digitalWrite(PIN_RST, LOW);  delay(100);
+  digitalWrite(PIN_RST, HIGH); delay(100);
+}
+
+void rawInitST7789() {
+  rawReset();
+  rawCmd(0x11); delay(120);            // Sleep out
+  rawCmd(0x36); rawDataByte(0x00);     // MADCTL
+  rawCmd(0x3A); rawDataByte(0x05);     // 16-bit color
+  rawCmd(0xB2);                        // Porch control
+  const uint8_t b2[] = {0x0C,0x0C,0x00,0x33,0x33};
+  rawData(b2, sizeof(b2));
+  rawCmd(0xB7); rawDataByte(0x35);     // Gate control
+  rawCmd(0xBB); rawDataByte(0x32);     // VCOM
+  rawCmd(0xC2); rawDataByte(0x01);     // VDV/VRH enable
+  rawCmd(0xC3); rawDataByte(0x15);     // VRH
+  rawCmd(0xC4); rawDataByte(0x20);     // VDV
+  rawCmd(0xC6); rawDataByte(0x0F);     // Frame rate
+  rawCmd(0xD0);                        // Power control
+  const uint8_t d0[] = {0xA4, 0xA1};
+  rawData(d0, sizeof(d0));
+  rawCmd(0x21);                        // Inversion ON
+  rawCmd(0x29); delay(20);             // Display ON
+}
+
+// ===== PART A: Raw SPI test =====
+bool testRawSPI() {
+  Serial.println("\n============ PART A: Raw SPI Test ============");
+  Serial.println("  (Bypasses TFT_eSPI completely)\n");
+
+  pinMode(PIN_CS,  OUTPUT); digitalWrite(PIN_CS,  HIGH);
+  pinMode(PIN_DC,  OUTPUT); digitalWrite(PIN_DC,  HIGH);
+  pinMode(PIN_RST, OUTPUT); digitalWrite(PIN_RST, HIGH);
+
+  Serial.printf("  Pins: SCLK=%d, MOSI=%d, CS=%d, DC=%d, RST=%d\n",
+                PIN_SCLK, PIN_MOSI, PIN_CS, PIN_DC, PIN_RST);
+
+  Serial.println("  Starting SPI (FSPI)...");
+  rawSpi.begin(PIN_SCLK, -1, PIN_MOSI, -1);
+  Serial.println("  SPI started OK.");
+
+  Serial.println("  Initializing ST7789...");
+  rawInitST7789();
+  Serial.println("  ST7789 init done.");
+
+  Serial.println("\n  Filling RED...");
+  rawFill(0xF800);
+  delay(1500);
+
+  Serial.println("  Filling GREEN...");
+  rawFill(0x07E0);
+  delay(1500);
+
+  Serial.println("  Filling BLUE...");
+  rawFill(0x001F);
+  delay(1500);
+
+  Serial.println("\n  >>> Did you see RED, GREEN, BLUE on the screen?");
+  Serial.println("  >>> If YES: hardware + wiring is 100% correct.");
+  Serial.println("  >>> If NO:  check wiring carefully.");
+
+  rawSpi.end();
+  return true;
+}
+
+// ===== PART B: TFT_eSPI test =====
+#include <TFT_eSPI.h>
+
+void testTftEspi() {
+  Serial.println("\n\n============ PART B: TFT_eSPI Test ============\n");
+
+  TFT_eSPI tft = TFT_eSPI();
+
+  Serial.println("[B1] TFT_eSPI compile-time defines:");
+  #ifdef TFT_MISO
+    Serial.printf("  TFT_MISO = %d\n", TFT_MISO);
+  #else
+    Serial.println("  TFT_MISO = NOT DEFINED (will use default -> may conflict!)");
+  #endif
+  Serial.printf("  TFT_MOSI = %d\n", TFT_MOSI);
+  Serial.printf("  TFT_SCLK = %d\n", TFT_SCLK);
+  Serial.printf("  TFT_CS   = %d\n", TFT_CS);
+  Serial.printf("  TFT_DC   = %d\n", TFT_DC);
+  Serial.printf("  TFT_RST  = %d\n", TFT_RST);
+
+  #ifdef USE_FSPI_PORT
+    Serial.println("  USE_FSPI_PORT = DEFINED");
+  #else
+    Serial.println("  USE_FSPI_PORT = not defined");
+  #endif
+  #ifdef USE_HSPI_PORT
+    Serial.println("  USE_HSPI_PORT = DEFINED");
+  #else
+    Serial.println("  USE_HSPI_PORT = not defined");
+  #endif
+
+  Serial.println("\n[B2] Calling tft.init()...");
+  Serial.println("  (If it hangs here, TFT_eSPI SPI config is broken)");
+  Serial.flush();
+
+  unsigned long t0 = millis();
+  tft.init();
+  unsigned long t1 = millis();
+
+  Serial.printf("  tft.init() completed in %lu ms\n", t1 - t0);
+
+  tft.setRotation(0);
+  tft.setSwapBytes(true);
+
+  Serial.println("\n[B3] Direct fill test...");
+  tft.fillScreen(TFT_RED);
+  delay(1000);
+  tft.fillScreen(TFT_GREEN);
+  delay(1000);
+  tft.fillScreen(TFT_BLUE);
+  delay(1000);
+
+  Serial.println("  >>> Did you see RED, GREEN, BLUE?");
+
+  Serial.println("\n[B4] Sprite allocation test...");
+  TFT_eSprite fb(&tft);
+  fb.setColorDepth(16);
+  void *ptr = fb.createSprite(240, 240);
+  if (!ptr) {
+    Serial.println("  [FAIL] createSprite(240,240) failed!");
+    Serial.printf("  Free heap: %d bytes\n", ESP.getFreeHeap());
+  } else {
+    Serial.println("  [OK] createSprite(240,240) succeeded.");
+    fb.fillSprite(TFT_BLACK);
+    fb.setTextColor(TFT_WHITE);
+    fb.setCursor(20, 20);
+    fb.setTextSize(2);
+    fb.println("TamaFi OK!");
+    fb.setTextSize(1);
+    fb.setCursor(20, 60);
+    fb.println("TFT_eSPI + Sprite working.");
+    fb.setCursor(20, 80);
+    fb.printf("Heap: %d bytes", ESP.getFreeHeap());
+    fb.pushSprite(0, 0);
+    Serial.println("  >>> Screen should show 'TamaFi OK!'");
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
   Serial.println("========================================");
-  Serial.println("   TamaFi TFT Diagnostic Tool");
+  Serial.println("   TamaFi TFT Diagnostic v2");
   Serial.println("========================================");
 
-  // ---- Step 1: Memory info ----
-  Serial.println("\n[1] Memory Info");
-  Serial.printf("  Total heap:  %d bytes\n", ESP.getHeapSize());
-  Serial.printf("  Free heap:   %d bytes\n", ESP.getFreeHeap());
-  Serial.printf("  PSRAM size:  %d bytes\n", ESP.getPsramSize());
-  Serial.printf("  Free PSRAM:  %d bytes\n", ESP.getFreePsram());
+  Serial.printf("\nChip:       %s\n", ESP.getChipModel());
+  Serial.printf("Free heap:  %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("PSRAM:      %d bytes\n", ESP.getPsramSize());
 
-  // ---- Step 2: TFT_eSPI setup info ----
-  Serial.println("\n[2] TFT_eSPI Configuration");
-  setup_t tftSetup;
-  tft.getSetup(tftSetup);
+  // Part A: raw SPI (always works if wiring is correct)
+  testRawSPI();
 
-  Serial.printf("  TFT_eSPI version: %s\n", tftSetup.version.c_str());
-  Serial.printf("  Driver:  0x%04X\n", tftSetup.setup_id);
-  Serial.printf("  SPI port: %d\n", tftSetup.port);
-  Serial.printf("  MOSI pin: %d\n", tftSetup.pin_tft_mosi);
-  Serial.printf("  MISO pin: %d\n", tftSetup.pin_tft_miso);
-  Serial.printf("  SCLK pin: %d\n", tftSetup.pin_tft_clk);
-  Serial.printf("  CS pin:   %d\n", tftSetup.pin_tft_cs);
-  Serial.printf("  DC pin:   %d\n", tftSetup.pin_tft_dc);
-  Serial.printf("  RST pin:  %d\n", tftSetup.pin_tft_rst);
-
-  Serial.println("\n  >>> Expected pins: MOSI=17, SCLK=18, CS=16, DC=15, RST=4");
-  Serial.println("  >>> If pins above DON'T match, User_Setup.h was NOT loaded correctly!");
-
-  bool pinsOK = (tftSetup.pin_tft_mosi == 17 &&
-                 tftSetup.pin_tft_clk  == 18 &&
-                 tftSetup.pin_tft_cs   == 16 &&
-                 tftSetup.pin_tft_dc   == 15 &&
-                 tftSetup.pin_tft_rst  == 4);
-
-  if (pinsOK) {
-    Serial.println("  [OK] Pins match expected configuration.");
-  } else {
-    Serial.println("  [FAIL] Pins DO NOT match! User_Setup.h is NOT being used.");
-    Serial.println("  --> Copy User_Setup.h to your TFT_eSPI library folder.");
-    Serial.println("  --> Also check User_Setup_Select.h in the TFT_eSPI library.");
-  }
-
-  // ---- Step 3: Init TFT ----
-  Serial.println("\n[3] Initializing TFT...");
-  tft.init();
-  tft.setRotation(0);
-  tft.setSwapBytes(true);
-  Serial.println("  tft.init() done.");
-
-  // ---- Step 4: Direct draw test (no sprite) ----
-  Serial.println("\n[4] Direct draw test (no sprite buffer)");
-
-  Serial.println("  Filling RED...");
-  tft.fillScreen(TFT_RED);
-  delay(1000);
-
-  Serial.println("  Filling GREEN...");
-  tft.fillScreen(TFT_GREEN);
-  delay(1000);
-
-  Serial.println("  Filling BLUE...");
-  tft.fillScreen(TFT_BLUE);
-  delay(1000);
-
-  Serial.println("  Drawing text on BLACK...");
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(10, 10);
-  tft.println("Direct draw OK!");
-  tft.setCursor(10, 30);
-  tft.printf("Free heap: %d", ESP.getFreeHeap());
   delay(2000);
 
-  Serial.println("  >>> Did you see RED, GREEN, BLUE, then text?");
-  Serial.println("  >>> If YES: TFT_eSPI works. Issue is in sprite allocation.");
-  Serial.println("  >>> If NO: TFT_eSPI config or SPI bus is wrong.");
-
-  // ---- Step 5: Sprite test ----
-  Serial.println("\n[5] Sprite allocation test");
-  Serial.printf("  Free heap before sprite: %d bytes\n", ESP.getFreeHeap());
-
-  fb.setColorDepth(16);
-  void* ptr = fb.createSprite(240, 240);
-
-  if (ptr == NULL) {
-    Serial.println("  [FAIL] createSprite(240,240) FAILED - not enough RAM!");
-    Serial.println("  >>> This is why the main program shows a black screen.");
-    Serial.println("  >>> The framebuffer could not be allocated.");
-
-    Serial.println("\n  Trying smaller sprite (120x120)...");
-    ptr = fb.createSprite(120, 120);
-    if (ptr) {
-      Serial.println("  [OK] 120x120 sprite works. Full 240x240 needs more RAM.");
-    } else {
-      Serial.println("  [FAIL] Even 120x120 failed. Severe memory issue.");
-    }
-  } else {
-    Serial.println("  [OK] createSprite(240,240) succeeded!");
-    Serial.printf("  Free heap after sprite: %d bytes\n", ESP.getFreeHeap());
-
-    fb.setSwapBytes(true);
-    fb.fillSprite(TFT_BLACK);
-    fb.setTextColor(TFT_CYAN);
-    fb.setCursor(10, 10);
-    fb.println("Sprite draw OK!");
-    fb.setCursor(10, 30);
-    fb.println("TFT_eSPI is working.");
-    fb.setCursor(10, 50);
-    fb.printf("Heap left: %d", ESP.getFreeHeap());
-
-    fb.drawRect(5, 5, 230, 230, TFT_YELLOW);
-
-    fb.pushSprite(0, 0);
-
-    Serial.println("  >>> Did you see 'Sprite draw OK!' with yellow border?");
-    Serial.println("  >>> If YES: Everything works. Main program should also work.");
-  }
+  // Part B: TFT_eSPI
+  testTftEspi();
 
   Serial.println("\n========================================");
   Serial.println("   Diagnostic complete.");
-  Serial.println("   Check serial output for [FAIL] items.");
   Serial.println("========================================");
 }
 
-void loop() {
-}
+void loop() {}
