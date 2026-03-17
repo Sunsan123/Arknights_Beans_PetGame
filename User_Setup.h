@@ -20,7 +20,7 @@
 //#define TFT_MISO    19  // "For some reason DMA requires that a MISO pin is defined" - https://github.com/Bodmer/TFT_eSPI/discussions/2233
 
 
-#define TFT_MISO -1
+#define TFT_MISO 6
 #define TFT_MOSI 17 	// aka SDA
 #define TFT_SCLK 18 	// aka SCL
 #define TFT_CS 16 	// Chip select control pin
