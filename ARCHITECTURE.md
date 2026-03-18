@@ -1,611 +1,1109 @@
-# TamaFi 虚拟宠物游戏 - 项目架构文档
+# TamaFi 项目主干代码功能与架构文档
 
-## Context
+## 1. 文档范围与分析边界
 
-本文档对 TamaFi V2 虚拟宠物游戏项目进行完整的架构分析。TamaFi 是一个基于 ESP32-S3 的 WiFi 感知虚拟宠物设备，宠物通过扫描周围 WiFi 网络来"进食"，拥有自主决策引擎、多阶段进化系统和完整的菜单 UI。本文档旨在帮助开发者理解项目整体运作原理和技术实现细节。
+本文档基于仓库当前主干源码进行静态分析，目标是帮助后续开发者快速理解项目的整体结构、运行方式、关键模块职责、数据流向与主要业务流程。
 
----
+### 1.1 分析范围
 
-## 1. 项目概述和核心功能特性
+本次分析覆盖以下**主干代码与直接运行依赖**：
 
-### 1.1 项目定位
+- `TamaFi/TamaFi.ino`：主程序入口与核心逻辑
+- `TamaFi/ui.h`：共享状态、枚举、结构体、UI 接口声明
+- `TamaFi/ui.cpp`：UI 渲染实现
+- `TamaFi/ui_anim.h`：动画时序常量
+- `TamaFi/StoneGolem.h`：宠物主动画资源
+- `TamaFi/egg_hatch.h`：蛋待机动画资源
+- `TamaFi/effect.h`：饥饿特效与 RIP 资源
+- `TamaFi/background.h`：背景图资源
+- `User_Setup.h`：TFT_eSPI 屏幕与 SPI 配置
 
-TamaFi 是一个现代化的电子宠物（类拓麻歌子）项目，核心创新点在于宠物以 **WiFi 信号为食物来源**。设备上的宠物会自主扫描周围 WiFi 网络，根据网络数量、信号强度、加密类型等信息获取营养。
+### 1.2 明确排除范围
 
-### 1.2 核心功能
+以下目录属于测试/诊断或硬件资料，不纳入“主干运行逻辑”分析：
 
-| 功能模块 | 说明 |
-|---------|------|
-| **WiFi 供养** | 宠物通过扫描 WiFi 网络获取饥饿/幸福/健康值 |
-| **自主决策引擎** | 宠物根据自身状态和环境自主选择捕猎/探索/休息/闲置 |
-| **多阶段进化** | BABY -> TEEN -> ADULT -> ELDER，基于年龄和平均属性 |
-| **心情系统** | 7 种心情状态，影响动画速度、LED 颜色、行为倾向 |
-| **个性特征** | 每只宠物随机生成好奇心/活动力/压力 3 项特征 |
-| **持久化存储** | 所有状态通过 NVS 持久化，断电不丢失 |
-| **完整菜单 UI** | 11 个屏幕页面，6 按钮导航（含快捷键） |
-| **复古音效引擎** | 非阻塞式芯片音乐序列播放器 |
-| **NeoPixel LED 反馈** | 4 颗 WS2812 RGB LED 提供心情/活动视觉反馈 |
-
-### 1.3 技术栈
-
-- **平台**: ESP32-S3 (Arduino 框架)
-- **显示**: TFT ST7789 240x240, TFT_eSPI 库
-- **LED**: Adafruit_NeoPixel 库
-- **WiFi**: ESP32 WiFi 库（仅扫描，不连接）
-- **存储**: Preferences 库 (NVS)
-- **开发环境**: Arduino IDE
+- `BuzzerTest/`
+- `DisplayTest_Mode3/`
+- `TFT_Diagnostic/`
+- `PCB/`
+- `Schematic/`
+- `Ui Graphics/`（设计源文件，不是运行时代码）
 
 ---
 
-## 2. 硬件架构
+## 2. 项目概述
 
-### 2.1 系统框图
+`TamaFi` 是一个运行在 `ESP32-S3` 上的虚拟宠物固件。项目的核心设定是：**宠物通过扫描周围 WiFi 网络来“觅食”**，并根据环境变化、自身属性和个性特征，自主决定是否执行捕猎、探索、休息或保持空闲。
 
-```
-                    ┌─────────────────────────────┐
-                    │        ESP32-S3 MCU          │
-                    │                              │
-  ┌────────────┐    │  GPIO 23 (MOSI) ──┐         │    ┌──────────────┐
-  │  6x 按钮   │────│  GPIO 18 (SCLK) ──┼── SPI ──│───>│ ST7789 TFT   │
-  │ (INPUT_PULLUP)  │  GPIO 22 (CS)   ──┘         │    │ 240x240      │
-  └────────────┘    │  GPIO 21 (DC)               │    └──────────────┘
-                    │  GPIO 12 (RST)              │
-                    │                              │
-                    │  GPIO 7 ── PWM CH0 ─────────│───> TFT 背光
-                    │  GPIO 2 ── PWM CH5 ─────────│───> 蜂鸣器
-                    │  GPIO 1 ── DATA ────────────│───> 4x WS2812 LED
-                    │                              │
-                    │  WiFi Radio (扫描模式) ──────│───> 环境感知
-                    │  NVS Flash ─────────────────│───> 持久化存储
-                    │                              │
-                    │  USB-C (原生 USB/CP2102) ────│───> 供电 & 烧录
-                    │  TP4056 + 锂电池 ───────────│───> 电池供电
-                    └─────────────────────────────┘
-```
+项目采用典型的 Arduino 单线程循环架构，但实现方式是**非阻塞式**的：
 
-### 2.2 GPIO 引脚分配
+- 主循环 `loop()` 高频运行
+- 逻辑更新由 `logicTick()` 按固定节拍推进
+- 音效、UI、WiFi 扫描、动画都以 `millis()` 时间片推进
+- 不依赖大段 `delay()`（除 `setup()` 中很短的启动延时与一次 `vTaskDelay(1)`）
 
-| GPIO | 功能 | 模式 | 说明 |
-|------|------|------|------|
-| 13 | BTN_UP | INPUT_PULLUP | 左侧上方按钮 |
-| 12 | BTN_OK | INPUT_PULLUP | 左侧中间确认按钮 |
-| 11 | BTN_DOWN | INPUT_PULLUP | 左侧下方按钮 |
-| 8 | BTN_RIGHT1 | INPUT_PULLUP | 右侧按钮 1（快捷: 宠物状态） |
-| 9 | BTN_RIGHT2 | INPUT_PULLUP | 右侧按钮 2（快捷: 环境信息） |
-| 10 | BTN_RIGHT3 | INPUT_PULLUP | 右侧按钮 3（快捷: 诊断） |
-| 23 | TFT_MOSI | SPI | TFT 数据线 |
-| 18 | TFT_SCLK | SPI | TFT 时钟线 |
-| 22 | TFT_CS | SPI | TFT 片选 |
-| 21 | TFT_DC | SPI | TFT 数据/命令 |
-| 12 | TFT_RST | OUTPUT | TFT 复位 |
-| 7 | TFT_BRIGHTNESS | PWM (CH0, 12kHz, 8bit) | TFT 背光亮度 |
-| 2 | BUZZER | PWM (CH5, 4kHz, 8bit) | 蜂鸣器 |
-| 1 | LED_PIN | NeoPixel DATA | 4x WS2812-2020 RGB LED |
+从代码结构看，系统可以抽象为四层：
 
-### 2.3 显示屏规格
-
-- **驱动芯片**: ST7789
-- **分辨率**: 240 x 240 像素（物理屏幕 240x340，使用 240x240 区域）
-- **色深**: 16 位 RGB565
-- **接口**: SPI (写入 27MHz / 读取 20MHz)
-- **背光控制**: MOSFET + PWM，支持 3 档亮度 (60/150/255)
-
-### 2.4 电源系统
-
-- **充电芯片**: TP4056 单节锂电池充电管理
-- **输入接口**: USB-C
-- **背光控制**: MOSFET 控制 TFT LED 引脚，PWM 调光
+1. **硬件接入层**：按键、WiFi、PWM、NeoPixel、TFT
+2. **状态与逻辑层**：宠物属性、情绪、进化、活动决策、存档
+3. **表现层**：动画、状态页、菜单页、特效、音效、灯效
+4. **资源层**：精灵图、背景图、特效贴图
 
 ---
 
-## 3. 软件架构
+## 3. 主干代码目录结构
 
-### 3.1 文件结构
-
-```
+```text
 Arknights_Beans_PetGame/
 ├── TamaFi/
-│   ├── TamaFi.ino        [~32KB] 主程序：初始化、游戏循环、逻辑、按钮、WiFi、音效、存储
-│   ├── ui.h               [~3KB]  UI 头文件：枚举定义、结构体声明、extern 变量
-│   ├── ui.cpp             [~24KB] UI 实现：所有屏幕渲染函数、菜单绘制、动画逻辑
-│   ├── ui_anim.h          [~1KB]  动画常量：各类动画的帧延迟时间定义
-│   ├── StoneGolem.h       [~1.8MB] 宠物精灵数据（idle/attack/dead 帧，115x110px）
-│   ├── egg_hatch.h        [~480KB] 蛋孵化精灵帧（5 帧孵化序列 + 4 帧蛋空闲）
-│   ├── effect.h           [~484KB] 特效精灵（饥饿效果 4 帧叠加层，100x95px）
-│   └── background.h       [~1.4MB] 背景图像数据（340x240px）
-├── PCB/                    PCB Gerber 文件和尺寸图
-├── Schematic/              电路原理图和 BOM
-├── Ui Graphics/            UI 设计源文件 (PSD) 和 PNG 精灵资源
-├── User_Setup.h            TFT_eSPI 库硬件引脚配置
-├── README.md               项目说明文档
-└── LICENSE                 MIT 开源许可
+│   ├── TamaFi.ino       主循环、状态机、输入、WiFi、音效、存档
+│   ├── ui.h             共享枚举/结构体/extern 声明
+│   ├── ui.cpp           屏幕渲染、动画推进、菜单绘制
+│   ├── ui_anim.h        动画时间常量
+│   ├── StoneGolem.h     宠物 idle / hatch / dead / attack 精灵数组
+│   ├── egg_hatch.h      蛋待机精灵数组
+│   ├── effect.h         饥饿特效与 RIP 资源
+│   └── background.h     背景图数组
+└── User_Setup.h         TFT_eSPI 的驱动与引脚配置
 ```
 
-### 3.2 模块职责划分
+### 3.1 各文件职责总览
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        TamaFi.ino (主模块)                       │
-│                                                                  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │
-│  │ 硬件初始化 │ │ 游戏逻辑  │ │ WiFi 扫描 │ │ 音效引擎  │           │
-│  │ setup()   │ │logicTick│ │startWifi │ │sndUpdate│           │
-│  └──────────┘ │updateMood│ │checkDone │ │sndClick │           │
-│               │updateEvo │ │resolveHunt│ │sndGood  │           │
-│  ┌──────────┐ │decideNext│ │resolveDisc│ └──────────┘           │
-│  │ 按钮处理  │ └──────────┘ └──────────┘                         │
-│  │handleBtns│                             ┌──────────┐          │
-│  └──────────┘ ┌──────────┐               │ LED 控制  │          │
-│               │ 持久化    │               │ledsHappy │          │
-│  ┌──────────┐ │saveState │               │ledsSad   │          │
-│  │ 休息状态机│ │loadState │               │ledsWifi  │          │
-│  │ stepRest │ └──────────┘               └──────────┘          │
-│  └──────────┘                                                    │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ 调用
-┌──────────────────────────▼──────────────────────────────────────┐
-│                   ui.cpp / ui.h (UI 模块)                        │
-│                                                                  │
-│  ┌────────────┐  ┌────────────────┐  ┌────────────────────────┐ │
-│  │ 屏幕渲染    │  │ 精灵帧表管理    │  │ 菜单动画 & 工具函数     │ │
-│  │screenHome  │  │ IDLE_FRAMES    │  │ animateSelector       │ │
-│  │screenMenu  │  │ EGG_FRAMES     │  │ drawBar               │ │
-│  │screenHatch │  │ ATTACK_FRAMES  │  │ uiOnScreenChange      │ │
-│  │screenStatus│  │ HUNGER_FRAMES  │  │ uiInit                │ │
-│  │screenEnv   │  │ DEAD_FRAMES    │  └────────────────────────┘ │
-│  │ ... 11个    │  └────────────────┘                             │
-│  └────────────┘                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 3.3 主循环数据流
-
-```
-loop() [每帧执行]
-  │
-  ├─> sndUpdate()                    // 非阻塞音符序列推进
-  ├─> stopBuzzerIfNeeded()           // 蜂鸣器超时静音
-  │
-  ├─> logicTick() [每 100ms]         // 核心游戏逻辑
-  │   ├─> 属性衰减 (hunger/happiness/health)
-  │   ├─> 年龄增长 (分->时->天)
-  │   ├─> 饥饿特效管理
-  │   ├─> WiFi 扫描完成检查 -> resolveHunt()/resolveDiscover()
-  │   ├─> stepRest() (休息状态机)
-  │   ├─> updateMood() (心情重新评估)
-  │   ├─> updateEvolution() (进化条件检查)
-  │   ├─> 死亡检测 (三项属性均为 0)
-  │   ├─> 自动保存 (每 30s)
-  │   └─> decideNextActivity() (仅 HOME 屏幕 + 空闲时)
-  │
-  ├─> handleButtons()                // 按钮边沿检测 & 屏幕导航
-  │
-  └─> uiDrawScreen()                 // 当前屏幕渲染 -> 推送到 TFT
-```
+| 文件 | 角色 | 核心职责 |
+| --- | --- | --- |
+| `TamaFi.ino` | 运行时核心 | 初始化、全局状态、按键处理、WiFi 扫描、情绪/进化、活动决策、休息状态机、自动保存、主循环 |
+| `ui.h` | 共享契约 | 定义 `Screen`、`Activity`、`Mood`、`Stage`、`RestPhase`、`Pet`、`WifiStats`，声明 UI API 与跨文件共享变量 |
+| `ui.cpp` | UI 层 | 负责所有屏幕绘制、局部动画推进、状态条/高亮条/图标绘制 |
+| `ui_anim.h` | 动画配置层 | 统一维护孵化、待机、休息、饥饿特效、死亡、菜单动画的时间参数 |
+| `StoneGolem.h` | 运行时素材 | 存放主宠物帧图：idle、attack、death，以及 hatch 过渡帧 |
+| `egg_hatch.h` | 运行时素材 | 存放蛋的待机动画帧 |
+| `effect.h` | 运行时素材 | 存放饥饿覆盖特效与 `rip_ms` |
+| `background.h` | 运行时素材 | 存放多个背景图数组 |
+| `User_Setup.h` | 硬件配置 | 为 `TFT_eSPI` 指定 ST7789 驱动、分辨率、SPI 引脚和频率 |
 
 ---
 
-## 4. 核心系统分析
+## 4. 运行时总体架构
 
-### 4.1 宠物状态管理
+### 4.1 架构分层
 
-#### 数据结构 (`ui.h`)
+```text
+输入/外设层
+  ├─ 按键 GPIO
+  ├─ WiFi 扫描
+  ├─ TFT SPI
+  ├─ NeoPixel
+  └─ PWM（蜂鸣器 / 背光）
+          │
+          ▼
+状态与逻辑层（TamaFi.ino）
+  ├─ 宠物属性
+  ├─ 情绪系统
+  ├─ 进化系统
+  ├─ 活动决策
+  ├─ 休息状态机
+  ├─ NVS 持久化
+  └─ 页面导航状态
+          │
+          ▼
+表现层（ui.cpp）
+  ├─ Home 渲染
+  ├─ 菜单渲染
+  ├─ 状态页渲染
+  ├─ 动画推进
+  └─ 特效叠加
+          │
+          ▼
+显示/反馈输出
+  ├─ TFT 显示
+  ├─ 音效序列器
+  └─ LED 灯效
+```
+
+### 4.2 共享状态模型
+
+项目没有引入类封装或模块对象，而是采用**全局共享状态 + 分层函数调用**的组织方式。
+
+主共享状态包括：
+
+- 页面状态：`currentScreen`
+- 行为状态：`currentActivity`
+- 休息子状态：`restPhase`
+- 宠物属性：`pet`
+- 环境数据：`wifiStats`
+- 情绪：`currentMood`
+- 成长阶段：`petStage`
+- 效果状态：`hungerEffectActive`、`hungerEffectFrame`
+- 设置项：声音、灯、亮度、自动保存间隔等
+
+`ui.cpp` 不自行维护业务数据，而是通过 `extern` 直接读取上述共享状态进行渲染。
+
+### 4.3 主循环执行框架
+
+`loop()` 是项目的调度中心，当前执行顺序如下：
+
+```text
+loop()
+  ├─ 记录屏幕切换时间 screenEnteredAt
+  ├─ sndUpdate()                // 推进非阻塞音效序列
+  ├─ 处理 NeoPixel 清空/禁用状态
+  ├─ stopBuzzerIfNeeded()       // 蜂鸣器超时静音
+  ├─ 每 100ms 调用 logicTick()  // 仅在非 BOOT / HATCH 页面执行
+  ├─ BOOT 页面自动跳转（1.5s）
+  ├─ HATCH 页面自动触发孵化（2s，未孵化时）
+  ├─ handleButtons()            // 边沿检测 + 页面导航 + 设置修改
+  └─ uiDrawScreen(...)          // 统一渲染当前页面
+```
+
+这里体现了两个关键设计点：
+
+- **逻辑和渲染解耦**：业务状态先更新，再统一渲染
+- **节拍式推进**：逻辑 tick 固定 100ms，而渲染每轮循环都进行
+
+---
+
+## 5. 核心数据结构与枚举
+
+### 5.1 `Pet`
+
+用于描述宠物本体状态：
 
 ```cpp
 struct Pet {
-  int hunger;              // 0-100，饥饿度
-  int happiness;           // 0-100，幸福感
-  int health;              // 0-100，健康值
+  int hunger;
+  int happiness;
+  int health;
   unsigned long ageMinutes;
   unsigned long ageHours;
   unsigned long ageDays;
 };
 ```
 
-#### 属性衰减规则
+职责：
 
-| 属性 | 衰减周期 | 正常衰减 | 加速衰减条件 | 加速衰减量 |
-|------|---------|---------|------------|----------|
-| hunger | 5 秒 | -2 | -- | -- |
-| happiness | 7 秒 | -1 | 无 WiFi > 30 秒 | -3 |
-| health | 10 秒 | -1 | hunger < 20 或 happiness < 20 | -2 |
+- 表示核心生存属性
+- 作为情绪判断、进化判断、死亡判断的基础输入
+- 作为 UI 状态页与主界面状态条的数据来源
 
-所有属性被 `constrain()` 限制在 0-100 范围内。
+### 5.2 `WifiStats`
 
-#### 死亡条件
+用于承接一次 WiFi 扫描的统计结果：
 
-当 `hunger <= 0 && happiness <= 0 && health <= 0` 时触发游戏结束，跳转 `SCREEN_GAMEOVER`，显示死亡动画并闪烁红色 LED。玩家可按 OK 键重置宠物重新开始。
+- `netCount`：扫描到的网络数
+- `strongCount`：强信号网络数（RSSI > -60）
+- `hiddenCount`：隐藏 SSID 数量
+- `avgRSSI`：平均信号强度
+- `openCount`：开放网络数量
+- `wpaCount`：非开放网络数量
 
-### 4.2 情绪系统
+职责：
 
-7 种心情按优先级从高到低判定：
+- 决定捕猎/探索收益
+- 参与情绪判断
+- 参与自主决策评分
+- 在环境页面中展示
 
-| 优先级 | 心情 | 触发条件 |
-|-------|------|---------|
-| 1 | MOOD_SICK | health < 25 或 WiFi 缺失 > 60s |
-| 2 | MOOD_HUNGRY | hunger < 25 |
-| 3 | MOOD_EXCITED | happiness > 80 且 WiFi 网络数 > 8 |
-| 4 | MOOD_HAPPY | happiness > 60 且 WiFi 网络数 > 0 |
-| 5 | MOOD_BORED | WiFi 缺失 > 30s |
-| 6 | MOOD_CURIOUS | 附近有隐藏网络或开放网络 |
-| 7 | MOOD_CALM | 默认状态 |
+### 5.3 页面与行为枚举
 
-**心情影响**:
-- **动画速度**: EXCITED = 120ms/帧, CALM = 200ms/帧, BORED/SICK = 280ms/帧
-- **LED 颜色**: 对应心情显示不同颜色
-- **自主决策**: 影响各活动的欲望评分（详见 4.4）
+| 枚举 | 作用 |
+| --- | --- |
+| `Screen` | 页面状态机：Boot、Hatch、Home、Menu、Status、Environment、SysInfo、Controls、Settings、Diagnostics、GameOver |
+| `Activity` | 行为状态：无行为、捕猎、探索、休息 |
+| `Stage` | 成长阶段：`BABY`、`TEEN`、`ADULT`、`ELDER` |
+| `Mood` | 情绪状态：`HUNGRY`、`HAPPY`、`CURIOUS`、`BORED`、`SICK`、`EXCITED`、`CALM` |
+| `RestPhase` | 休息状态机：`NONE`、`ENTER`、`DEEP`、`WAKE` |
 
-### 4.3 进化机制
-
-4 个生命阶段，不可逆转：
-
-| 当前阶段 | 目标阶段 | 年龄要求 | 平均属性要求 |
-|---------|---------|---------|------------|
-| BABY | TEEN | >= 20 分钟 | avg(hunger, happiness, health) > 35 |
-| TEEN | ADULT | >= 60 分钟 | avg > 45 |
-| ADULT | ELDER | >= 180 分钟 | avg > 40 |
-
-进化触发时播放发现音效 (`sndDiscover()`) 并闪烁 WiFi 蓝色 LED。
-
-### 4.4 WiFi 交互系统
-
-#### 扫描流程
-
-```
-startWifiScan()              // 异步启动
-  │  WiFi.mode(WIFI_STA)
-  │  WiFi.disconnect(true)
-  │  WiFi.scanNetworks(true) // async=true
-  ▼
-logicTick() 轮询
-  │  checkWifiScanDone()
-  │  WiFi.scanComplete() > 0 ?
-  ▼
-统计网络特征 -> WifiStats
-  │  netCount, strongCount (>-60dBm)
-  │  hiddenCount, openCount, wpaCount
-  │  avgRSSI
-  ▼
-resolveHunt() 或 resolveDiscover()
-```
-
-#### 捕猎 (Hunt) 收益计算
-
-- **无网络**: hunger -15, happiness -10, health -5（播放失败音效）
-- **有网络**:
-  - `hungerDelta = min(35, netCount*2 + strongCount*3)`
-  - `happyDelta = min(30, varietyScore*3 + (avgRSSI+100)/3)`
-  - `healthDelta`: avgRSSI > -75 时 +5, > -65 时再 +5, strongCount > 5 时再 +3
-
-#### 探索 (Discover) 收益计算
-
-- `curiosity = hiddenCount*4 + openCount*3 + netCount`
-- `happyDelta = min(35, curiosity/2)`
-- `hungerDelta = -5`（轻微消耗）
-
-#### 自主决策引擎
-
-每 8-15 秒（随机间隔）宠物在 HOME 屏幕空闲时自主决策：
-
-```
-欲望计算:
-  desireHunt = (100 - hunger) + traitCuriosity/2
-  desireDisc = traitCuriosity + hiddenCount*10 + openCount*6
-  desireRest = (100 - health) + traitStress/2
-  desireIdle = 10（基线）
-
-心情调整:
-  HUNGRY  -> desireHunt +20, desireRest -10
-  CURIOUS -> desireDisc +15
-  SICK    -> desireRest +20, desireDisc -10
-  EXCITED -> desireDisc +10, desireHunt +5
-  BORED   -> desireDisc +10, desireHunt +5
-
-选择最高欲望的活动执行
-```
-
-### 4.5 休息状态机
-
-```
-REST_NONE ──[决策选择休息]──> REST_ENTER
-                                │
-                          蛋帧 5->4->3->2->1
-                          每帧 400ms
-                                │
-                                ▼
-                            REST_DEEP
-                          蓝色呼吸 LED
-                          持续 5-15s
-                          中点恢复属性:
-                            hunger -3
-                            happiness +10
-                            health +15
-                                │
-                                ▼
-                            REST_WAKE
-                          蛋帧 1->2->3->4->5
-                          播放苏醒音效
-                                │
-                                ▼
-                            REST_NONE (回到空闲)
-```
-
-### 4.6 个性特征系统
-
-首次启动时随机生成，永久保存：
-
-| 特征 | 取值范围 | 影响 |
-|------|---------|------|
-| traitCuriosity | 40-90 | 提高探索欲望，增强对隐藏/开放网络的反应 |
-| traitActivity | 30-90 | 影响自主活动频率 |
-| traitStress | 20-80 | 提高休息欲望，增强对环境压力的敏感度 |
+这些枚举共同组成了系统的“离散状态空间”，也是整个固件最重要的骨架。
 
 ---
 
-## 5. 用户界面架构
+## 6. 核心模块详解
 
-### 5.1 渲染管线
+## 6.1 `TamaFi.ino`：主程序与核心逻辑中心
 
-采用三层精灵缓冲的双缓冲架构，消除画面闪烁：
+`TamaFi.ino` 集中了绝大多数业务逻辑，承担了“控制器 + 运行时状态仓库”的双重角色。
 
-```
-┌─────────────────┐     ┌─────────────────┐
-│ petSprite       │────>│                 │
-│ 115x110, 16bit  │     │   fb (帧缓冲)    │     ┌──────────┐
-└─────────────────┘     │   240x240       │────>│ TFT 屏幕  │
-┌─────────────────┐     │   16bit RGB565  │     │ 240x240  │
-│ effectSprite    │────>│                 │     └──────────┘
-│ 100x95, 16bit   │     └─────────────────┘
-└─────────────────┘       pushSprite(0,0)
+### 6.1.1 硬件对象初始化
 
-精灵使用 TFT_WHITE 作为透明色键
-```
+文件中直接实例化：
 
-### 5.2 屏幕状态机
+- `TFT_eSPI tft`
+- `TFT_eSprite fb`
+- `TFT_eSprite petSprite`
+- `TFT_eSprite effectSprite`
+- `Adafruit_NeoPixel leds`
+- `Preferences prefs`
 
-```
-SCREEN_BOOT ──[任意按钮]──> SCREEN_HATCH (首次) 或 SCREEN_HOME (已孵化)
-                                │
-SCREEN_HATCH ──[OK 按钮]──> SCREEN_HOME
-                                │
-                                ├──[OK]──> SCREEN_MENU
-                                │            ├─[0] SCREEN_PET_STATUS
-                                │            ├─[1] SCREEN_ENVIRONMENT
-                                │            ├─[2] SCREEN_SYSINFO
-                                │            ├─[3] SCREEN_CONTROLS
-                                │            ├─[4] SCREEN_SETTINGS
-                                │            ├─[5] SCREEN_DIAGNOSTICS
-                                │            └─[6] 返回 HOME
-                                │
-                                ├──[R1]──> SCREEN_PET_STATUS (快捷)
-                                ├──[R2]──> SCREEN_ENVIRONMENT (快捷)
-                                └──[R3]──> SCREEN_DIAGNOSTICS (快捷)
+这意味着：
 
-SCREEN_GAMEOVER ──[OK]──> SCREEN_HATCH (重置重生)
-```
+- UI 模块并不拥有显示对象，只是借用这些全局对象
+- 所有资源与渲染目标都常驻内存/全局作用域
 
-### 5.3 HOME 屏幕图层合成
+### 6.1.2 设置与特征状态
 
-```
-图层 1: 黑色背景填充
-图层 2: 背景图像 (backgroundImage)
-图层 3: 宠物精灵 (根据活动状态选择 idle/attack/egg/dead 帧)
-图层 4: 状态条 (红色=饥饿, 黄色=幸福, 绿色=健康)
-图层 5: 文本叠加 (心情、阶段、活动标签)
-图层 6: 饥饿效果叠加层 (当 hungerEffectActive 时, 4帧循环)
-```
+主文件还维护下列运行时配置：
 
-### 5.4 菜单系统
+- `soundEnabled`
+- `neoPixelsEnabled`
+- `tftBrightnessIndex`
+- `ledBrightnessIndex`
+- `autoSleep`
+- `autoSaveMs`
+- `traitCuriosity`
+- `traitActivity`
+- `traitStress`
 
-主菜单 7 项，使用 UP/DOWN 滚动，OK 确认：
+其中：
 
-| 索引 | 菜单项 | 目标屏幕 | 内容 |
-|------|--------|---------|------|
-| 0 | Pet Status | SCREEN_PET_STATUS | 属性值、心情、年龄、阶段、特征描述 |
-| 1 | Environment | SCREEN_ENVIRONMENT | WiFi 统计（网络数/强信号/隐藏/开放/RSSI） |
-| 2 | System Info | SCREEN_SYSINFO | 固件版本、MCU 型号、堆内存、运行时间 |
-| 3 | Controls | SCREEN_CONTROLS | TFT 亮度、LED 亮度、声音开关、NeoPixel 开关 |
-| 4 | Settings | SCREEN_SETTINGS | 主题、自动睡眠、自动保存、重置选项 |
-| 5 | Diagnostics | SCREEN_DIAGNOSTICS | 当前活动、心情、休息阶段、WiFi 状态 |
-| 6 | Back | SCREEN_HOME | 返回主页 |
-
-菜单选中项使用动画高亮条（灰色底 + 青色边框），通过 `animateSelector()` 实现平滑滚动。
-
-### 5.5 动画帧配置 (`ui_anim.h`)
-
-| 动画类型 | 帧延迟 | 帧数 | 说明 |
-|---------|-------|------|------|
-| 蛋空闲 | 350ms | 4 | 孵化前蛋的摇晃动画 |
-| 孵化 | 300ms | 5 | 蛋裂开到宠物出现 |
-| 宠物空闲（基础） | 200ms | 4 | 正常呼吸/待机动画 |
-| 宠物空闲（兴奋） | 120ms | 4 | 加速动画 |
-| 宠物空闲（无聊/病） | 280ms | 4 | 减速动画 |
-| 攻击/捕猎 | 300ms | 3 | WiFi 扫描时的攻击动画 |
-| 饥饿效果 | 100ms | 4 | 低饥饿时的视觉警告 |
-| 休息进入/唤醒 | 400ms | 5 | 入睡和苏醒过渡动画 |
-| 呼吸周期 | 400ms | - | 睡眠时 LED 正弦波明暗 |
-| 死亡 | 300ms | 3 | 游戏结束动画 |
+- `traitCuriosity` 和 `traitStress` 真正参与了决策逻辑
+- `traitActivity` 当前仅被存档和展示，**没有参与行为频率或评分计算**
+- `autoSleep` 当前只在设置页中切换和展示，**没有接入实际自动睡眠逻辑**
 
 ---
 
-## 6. 代码组织和关键实现细节
+## 6.2 输入系统：按键与页面导航
 
-### 6.1 TamaFi.ino 代码结构（按功能区域）
+### 6.2.1 按键模式
 
-| 行号范围 | 功能区域 |
-|---------|---------|
-| 1-55 | 库引入、宏定义、全局变量声明 |
-| 56-100 | 定时器变量、状态标志 |
-| 100-220 | 按钮处理函数 (`buttonPressed`, `handleButtons`) |
-| 223-306 | 音效系统 (`RetroSound` 结构体、7 种音效定义、`sndUpdate`) |
-| 315-359 | WiFi 扫描 (`startWifiScan`, `checkWifiScanDone`) |
-| 362-428 | 持久化存储 (`saveState`, `loadState`) |
-| 431-480 | 心情和进化更新 (`updateMood`, `updateEvolution`) |
-| 483-559 | 休息状态机 (`stepRest`) |
-| 564-615 | 活动解算 (`resolveHunt`, `resolveDiscover`) |
-| 618-691 | 自主决策引擎 (`decideNextActivity`) |
-| 693-715 | LED 控制函数 (`ledsHappy`, `ledsSad`, `ledsWifi`, etc.) |
-| 717-809 | 逻辑更新主函数 (`logicTick`) |
-| 810-1070 | 按钮处理各屏幕分支逻辑 |
-| 1074-1144 | `setup()` 初始化 |
-| 1146-1168 | `loop()` 主循环 |
+项目使用 6 个按键：
 
-### 6.2 ui.cpp 代码结构
+- 左侧：`UP`、`OK`、`DOWN`
+- 右侧：`RIGHT1`、`RIGHT2`、`RIGHT3`
 
-| 功能区域 | 说明 |
-|---------|------|
-| 精灵帧表定义 | 各动画的 `const uint16_t*` 数组 |
-| `uiInit()` | UI 模块初始化 |
-| `uiOnScreenChange()` | 屏幕切换回调，重置动画和高亮位置 |
-| `uiDrawScreen()` | 顶层分发函数，根据 currentScreen 调用对应渲染器 |
-| `screenBoot()` | 启动画面 |
-| `screenHatch()` | 孵化界面（蛋空闲 + 孵化动画） |
-| `screenHome()` | 主界面渲染（背景+精灵+状态条+文本+特效） |
-| `screenMenu()` | 主菜单（7项+图标+高亮动画） |
-| `screenPetStatus()` | 宠物详细状态 |
-| `screenEnvironment()` | WiFi 环境统计 |
-| `screenSysInfo()` | 系统信息 |
-| `screenControls()` | 控制设置（亮度/声音/LED） |
-| `screenSettings()` | 游戏设置 |
-| `screenDiagnostics()` | 调试诊断 |
-| `screenGameOver()` | 游戏结束（死亡动画） |
-| `drawBar()` | 通用状态条绘制 |
-| `animateSelector()` | 菜单选中项平滑滚动动画 |
+全部采用 `INPUT_PULLUP`，通过 `buttonPressed()` 做下降沿检测。
 
-### 6.3 关键设计模式
+### 6.2.2 输入职责
 
-- **非阻塞架构**: 全局无 `delay()` 调用，所有定时基于 `millis()` 时间戳比较
-- **状态机模式**: 屏幕导航 (Screen 枚举)、休息阶段 (RestPhase)、活动类型 (Activity) 均为独立状态机
-- **双缓冲渲染**: 所有绘制先写入帧缓冲精灵，最后一次性 `pushSprite()` 到屏幕
-- **边沿检测按钮**: 记录上次状态，仅在 HIGH->LOW 跳变时触发，避免重复响应
-- **关注点分离**: 游戏逻辑 (TamaFi.ino) 和 UI 渲染 (ui.cpp) 通过 extern 变量和枚举交互
+`handleButtons()` 负责：
+
+- 页面切换
+- 菜单上下移动
+- 设置值切换
+- 快捷页跳转
+- 游戏结束后重生
+- 手动触发孵化
+
+### 6.2.3 页面导航特点
+
+- `HOME` 页面按 `OK` 进入主菜单
+- `RIGHT1/2/3` 分别直达 `Pet Status`、`Environment`、`Diagnostics`
+- 这些快捷页再次按右侧任一按钮会直接返回 `HOME`
+- `BOOT` 页面理论上支持任意左键继续
+- `HATCH` 页面支持 `OK` 触发孵化
+- `GAMEOVER` 页面 `OK` 重新开始
+
+### 6.2.4 当前主干中的特殊实现
+
+为了适配当前的面包板原型，`loop()` 中额外加入了自动流程：
+
+- `BOOT` 停留 1.5 秒后自动进入 `HOME` 或 `HATCH`
+- 未孵化时，`HATCH` 停留 2 秒后自动置 `hatchTriggered = true`
+
+因此，**当前代码已经不是“必须依赖按键才能进入游戏”**，而是兼容“无按键原型机”运行。
 
 ---
 
-## 7. 持久化存储和配置管理
+## 6.3 WiFi 交互系统
 
-### 7.1 NVS 存储方案
+WiFi 是项目的环境输入来源，也是宠物“进食/探索”的业务核心。
 
-使用 ESP32 Preferences 库，命名空间 `"tamafi2"`，读写模式。
+### 6.3.1 扫描启动
 
-#### 存储键值表
+`startWifiScan()` 做了三件事：
 
-| 键名 | 类型 | 内容 | 默认值（首次启动） |
-|------|------|------|----------------|
-| `"hunger"` | int | 饥饿度 | 70 |
-| `"happy"` | int | 幸福感 | 70 |
-| `"health"` | int | 健康值 | 70 |
-| `"ageMin"` | ulong | 存活分钟数 | 0 |
-| `"ageHr"` | ulong | 存活小时数 | 0 |
-| `"ageDay"` | ulong | 存活天数 | 0 |
-| `"stage"` | uchar | 进化阶段 | 0 (BABY) |
-| `"hatched"` | bool | 是否已孵化 | false |
-| `"sound"` | bool | 声音开关 | true |
-| `"tftBri"` | uchar | TFT 亮度档位 (0/1/2) | 1 |
-| `"ledBri"` | uchar | LED 亮度档位 (0/1/2) | 1 |
-| `"neo"` | bool | NeoPixel 开关 | true |
-| `"tCur"` | uchar | 好奇心特征 | random(40,90) |
-| `"tAct"` | uchar | 活动力特征 | random(30,90) |
-| `"tStr"` | uchar | 压力特征 | random(20,80) |
+1. `WiFi.mode(WIFI_STA)`
+2. `WiFi.disconnect(true)`
+3. `WiFi.scanNetworks(true)` 发起异步扫描
 
-### 7.2 首次启动检测
+扫描期间只标记 `wifiScanInProgress = true`，不阻塞主循环。
 
-通过读取 `"hunger"` 键值是否为 -1（默认返回值）来判断是否首次启动。首次启动时初始化所有默认值并随机生成个性特征，然后立即保存。
+### 6.3.2 扫描完成检查
 
-### 7.3 自动保存机制
+`checkWifiScanDone()` 在后续逻辑 tick 中轮询：
 
-- 自动保存间隔: 30 秒 (`autoSaveMs`)
-- 在 `logicTick()` 中检查时间戳触发
-- 菜单中更改控制/设置后也会触发保存
+- 若仍在扫描：返回 `false`
+- 若扫描失败：清空 `wifiStats`
+- 若扫描成功：统计网络数量、信号强度、加密类型、平均 RSSI
+- 最后 `WiFi.scanDelete()` 释放扫描结果
+
+### 6.3.3 扫描结果落地
+
+统计完成后，结果写入全局 `wifiStats`。从这一刻开始，以下模块都可消费同一份环境快照：
+
+- 情绪系统
+- 自主决策系统
+- 捕猎结算
+- 探索结算
+- 环境页面 UI
 
 ---
 
-## 8. 音频和灯光反馈系统
+## 6.4 宠物属性衰减与生存规则
 
-### 8.1 复古音效引擎
+`logicTick()` 负责按节拍推动宠物属性变化。
 
-#### 音效序列器架构
+### 6.4.1 属性衰减规则
 
-```cpp
-struct RetroSound {
-  const int *freqs;   // 频率数组 (Hz)
-  const int *times;   // 每音符持续时间 (ms)
-  int length;         // 音符数量
-};
-```
+| 属性 | 周期 | 规则 |
+| --- | --- | --- |
+| `hunger` | 5 秒 | 固定 -2 |
+| `happiness` | 7 秒 | 默认 -1；若长时间无 WiFi（30s 以上）则 -3 |
+| `health` | 10 秒 | 默认 -1；若 `hunger < 20` 或 `happiness < 20` 则 -2 |
 
-使用 ESP32 LEDc PWM 驱动蜂鸣器，通过 `ledcWriteTone()` 设置频率。
+所有结果最终都通过 `max()` 或 `constrain()` 限制在合理范围内。
 
-#### 音效列表
+### 6.4.2 年龄推进规则
 
-| 音效 | 音符数 | 总时长 | 触发场景 | 同步 LED |
-|------|-------|-------|---------|---------|
-| SND_CLICK | 3 | ~60ms | 菜单点击 | -- |
-| SND_GOOD | 4 | ~180ms | 捕猎成功 | 紫色 |
-| SND_BAD | 4 | ~240ms | 捕猎失败 | 红色 |
-| SND_DISC | 5 | ~250ms | 网络发现 | 蓝色 |
-| SND_REST_START | 3 | ~220ms | 入睡 | -- |
-| SND_REST_END | 3 | ~200ms | 苏醒 | -- |
-| SND_HATCH | 5 | ~360ms | 孵化完成 | -- |
+每 60 秒：
 
-#### 非阻塞播放实现
+- `ageMinutes++`
+- 分钟满 60 转为 `ageHours`
+- 小时满 24 转为 `ageDays`
 
-`sndUpdate()` 在主循环每帧调用，维护当前播放索引 (`sndIndex`)、当前音符步进 (`sndStep`) 和下一音符时间戳 (`sndNext`)。每帧检查是否到达下一音符时间，是则切换频率并推进步进。
+### 6.4.3 死亡条件
 
-### 8.2 NeoPixel LED 系统
+当以下条件同时成立时触发死亡：
 
-4 颗 WS2812-2020 RGB LED，通过 Adafruit_NeoPixel 库控制。
+- `pet.hunger <= 0`
+- `pet.happiness <= 0`
+- `pet.health <= 0`
 
-#### LED 颜色方案
+处理结果：
 
-| 状态 | 函数 | RGB | 视觉效果 |
-|------|------|-----|---------|
-| 快乐/好饲料 | `ledsHappy()` | (120, 40, 200) | 柔和紫色 |
-| 悲伤/坏饲料 | `ledsSad()` | (200, 0, 0) | 暗红色 |
-| WiFi/发现 | `ledsWifi()` | (0, 90, 255) | 柔和蓝色 |
-| 休息/睡眠 | `ledsRest()` | (0, 25, 90) | 深蓝色 |
-| 关闭 | `ledsOff()` | (0, 0, 0) | 全灭 |
-
-#### LED 亮度档位
-
-| 档位 | 亮度值 | 说明 |
-|------|-------|------|
-| 0 (低) | 20 | 省电/暗环境 |
-| 1 (中) | 90 | 默认 |
-| 2 (高) | 180 | 明亮环境 |
-
-#### 呼吸灯效果（深度睡眠）
-
-```
-亮度 = sin(时间相位) * 40 + 60
-颜色: 纯蓝色 (0, 0, 亮度)
-周期: REST_BREATHE_MS = 400ms
-```
-
-用正弦函数调制蓝色通道亮度，产生平缓的呼吸节奏效果。
-
-### 8.3 音效-LED 联动
-
-音效触发函数同时设置 LED 颜色，确保视听同步：
-- `sndGoodFeed()` -> 播放成功音 + `ledsHappy()` 紫色
-- `sndBadFeed()` -> 播放失败音 + `ledsSad()` 红色
-- `sndDiscover()` -> 播放发现音 + `ledsWifi()` 蓝色
+- 切换到 `SCREEN_GAMEOVER`
+- 清空当前行为
+- 中止休息状态
+- 点亮悲伤灯效
 
 ---
 
-## 关键文件路径
+## 6.5 情绪系统
 
-| 文件 | 路径 |
-|------|------|
-| 主程序 | `TamaFi/TamaFi.ino` |
-| UI 实现 | `TamaFi/ui.cpp` |
-| UI 头文件 | `TamaFi/ui.h` |
-| 动画常量 | `TamaFi/ui_anim.h` |
-| TFT 配置 | `User_Setup.h` |
-| 宠物精灵 | `TamaFi/StoneGolem.h` |
-| 背景图像 | `TamaFi/background.h` |
-| 孵化动画 | `TamaFi/egg_hatch.h` |
-| 特效精灵 | `TamaFi/effect.h` |
-| PCB 文件 | `PCB/` |
-| 原理图 | `Schematic/` |
-| UI 设计源文件 | `Ui Graphics/` |
+`updateMood()` 按固定优先级重算当前情绪。
+
+### 6.5.1 判定顺序
+
+1. `SICK`：`health < 25`，或长时间没有 WiFi 且上次扫描已超过 60 秒
+2. `HUNGRY`：`hunger < 25`
+3. `EXCITED`：`happiness > 80` 且网络数大于 8
+4. `HAPPY`：`happiness > 60` 且扫描到网络
+5. `BORED`：没有网络且距离上次扫描超过 30 秒
+6. `CURIOUS`：附近存在隐藏网络或开放网络
+7. `CALM`：默认状态
+
+### 6.5.2 情绪的业务作用
+
+情绪不仅是显示文本，还会直接影响：
+
+- `HOME` 页面待机动画速度
+- 自主活动评分偏置
+- 间接改变视觉观感与行为倾向
+
+例如：
+
+- `EXCITED`：待机更快，探索/捕猎意愿提升
+- `SICK`：休息意愿明显提升
+- `HUNGRY`：捕猎意愿显著提升
+
+---
+
+## 6.6 进化系统
+
+`updateEvolution()` 按年龄与平均属性判断成长阶段。
+
+### 6.6.1 条件
+
+| 目标阶段 | 年龄条件（以 `ageMinutes` 判定） | 平均属性条件 |
+| --- | --- | --- |
+| `TEEN` | `>= 20` | 平均值 `> 35` |
+| `ADULT` | `>= 60` | 平均值 `> 45` |
+| `ELDER` | `>= 180` | 平均值 `> 40` |
+
+### 6.6.2 进化反馈
+
+进化成功时：
+
+- 更新 `petStage`
+- 播放 `sndDiscover()`
+- 触发 WiFi 蓝色灯效
+
+### 6.6.3 实现说明
+
+当前实现以 `pet.ageMinutes` 作为进化判断输入，因此它实际上代表“累计分钟数中的当前分钟值”。由于代码会在满 60 分钟时把分钟减回 0、小时 +1，这使得阶段判断与“总存活时长”并不完全等价。
+
+这意味着：
+
+- `TEEN` 比较容易满足
+- `ADULT` / `ELDER` 的判定与直觉上的“总时长”并不完全一致
+
+这是后续维护时需要特别关注的实现细节。
+
+---
+
+## 6.7 自主决策引擎
+
+`decideNextActivity()` 是项目最核心的“行为 AI”。
+
+### 6.7.1 触发时机
+
+只有在以下条件同时满足时才会决策：
+
+- 当前页面是 `SCREEN_HOME`
+- 当前没有活动 `ACT_NONE`
+- 不处于休息子状态中
+- 距离上次决策超过当前决策间隔
+
+### 6.7.2 决策频率
+
+- 初始间隔：10 秒
+- 每次决策后重新随机为 `8000 ~ 15000 ms`
+
+### 6.7.3 评分项
+
+系统计算 4 个欲望值：
+
+- `desireHunt`
+- `desireDisc`
+- `desireRest`
+- `desireIdle`
+
+基础公式如下：
+
+- 捕猎欲望 = 饥饿缺口 + 好奇心一半
+- 探索欲望 = 好奇心 + 隐藏网络权重 + 开放网络权重 + 网络总数权重 + 随机扰动
+- 休息欲望 = 健康缺口 + 压力一半
+- 空闲欲望 = 常量 10
+
+### 6.7.4 环境与情绪修正
+
+- 没有网络时，捕猎/探索欲望会被减半
+- 饥饿时，捕猎 +20，休息 -10
+- 好奇时，探索 +15
+- 生病时，休息 +20，探索 -10
+- 兴奋时，探索 +10，捕猎 +5
+- 无聊时，探索 +10，捕猎 +5
+
+### 6.7.5 行为落地
+
+- 若选中 `HUNT` 或 `DISCOVER`：
+  - 写入 `currentActivity`
+  - 点亮 WiFi 灯效
+  - 启动异步 WiFi 扫描
+- 若选中 `REST`：
+  - 进入 `REST_ENTER`
+  - 初始化休息动画与持续时间
+  - 播放入睡音效
+  - 点亮休息灯效
+
+---
+
+## 6.8 捕猎与探索结算
+
+### 6.8.1 捕猎 `resolveHunt()`
+
+这是“WiFi 当食物”的核心落地。
+
+#### 无网络时
+
+- `hunger -= 15`
+- `happiness -= 10`
+- `health -= 5`
+- 播放失败音效
+
+#### 有网络时
+
+- `hungerDelta = min(35, netCount*2 + strongCount*3)`
+- `happyDelta = min(30, varietyScore*3 + (avgRSSI+100)/3)`
+- `healthDelta` 取决于平均信号与强信号数量
+
+结算完成后还会：
+
+- 激活 `hungerEffectActive`
+- 重置饥饿特效帧索引
+
+### 6.8.2 探索 `resolveDiscover()`
+
+探索不是直接进食，而是对环境“好奇”。
+
+#### 无网络时
+
+- `happiness -= 5`
+- `hunger -= 3`
+- 播放失败音效
+
+#### 有网络时
+
+- 计算 `curiosity = hidden*4 + open*3 + netCount`
+- `happyDelta = min(35, curiosity / 2)`
+- `hungerDelta = -5`
+- 播放发现音效
+
+### 6.8.3 统一收尾
+
+在 `logicTick()` 中，扫描完成后：
+
+- 根据 `currentActivity` 调用对应结算函数
+- 活动结束后设回 `ACT_NONE`
+- 熄灭 WiFi 灯效
+
+---
+
+## 6.9 休息状态机
+
+休息流程由 `stepRest()` 驱动，是代码中最完整的子状态机之一。
+
+### 6.9.1 状态流转
+
+```text
+REST_NONE
+  └─> REST_ENTER
+        └─> REST_DEEP
+              └─> REST_WAKE
+                    └─> REST_NONE
+```
+
+### 6.9.2 各阶段职责
+
+#### `REST_ENTER`
+
+- 用蛋的孵化帧做反向播放
+- 表示“进入睡眠”
+- 每 `400ms` 前进一帧
+
+#### `REST_DEEP`
+
+- 保持在蛋帧 1
+- 使用正弦函数驱动蓝色呼吸灯
+- 休息中点为宠物恢复属性：
+  - `hunger -3`
+  - `happiness +10`
+  - `health +15`
+
+#### `REST_WAKE`
+
+- 用蛋帧正向播放
+- 播放醒来音效
+- 结束后恢复到 `ACT_NONE`
+
+### 6.9.3 休息持续时间
+
+由随机区间决定：
+
+- 最短 `5000 ms`
+- 最长 `15000 ms`
+
+---
+
+## 6.10 音效系统
+
+音效使用 `RetroSound` 结构 + `sndUpdate()` 非阻塞序列器实现。
+
+### 6.10.1 机制
+
+- 每种音效是一组频率数组和时长数组
+- `sndIndex` 表示当前正在播哪一组音效
+- `sndStep` 表示播到第几个音符
+- `sndNext` 表示下一个音符切换时间
+- `sndUpdate()` 在每轮 `loop()` 中推进
+
+### 6.10.2 已实现音效
+
+- 点击音 `SND_CLICK`
+- 成功音 `SND_GOOD`
+- 失败音 `SND_BAD`
+- 发现音 `SND_DISC`
+- 入睡音 `SND_REST_START`
+- 醒来音 `SND_REST_END`
+- 孵化音 `SND_HATCH`
+
+### 6.10.3 与 LED 的联动
+
+部分音效在触发时直接联动灯效：
+
+- `sndGoodFeed()` → 紫色
+- `sndBadFeed()` → 红色
+- `sndDiscover()` → 蓝色
+
+---
+
+## 6.11 NeoPixel 与背光控制
+
+### 6.11.1 NeoPixel
+
+系统支持 4 颗 WS2812：
+
+- `ledsHappy()`：柔和紫色
+- `ledsSad()`：暗红色
+- `ledsWifi()`：蓝色
+- `ledsRest()`：深蓝色
+
+亮度通过 `applyLedBrightness()` 统一设置为三档：
+
+- 低：20
+- 中：90
+- 高：180
+
+### 6.11.2 TFT 背光
+
+背光由 PWM 控制，三档值分别为：
+
+- 低：60
+- 中：150
+- 高：255
+
+### 6.11.3 实现注意点
+
+`neoPixelsEnabled` 为 `false` 时，`ledsOff()` 会直接返回，因此“关闭灯光”更像是**禁止后续写灯**，而不是强制清空当前灯态。这属于当前实现中的一个行为细节。
+
+---
+
+## 6.12 持久化存储
+
+项目使用 `Preferences`，命名空间为 `tamafi2`。
+
+### 6.12.1 保存内容
+
+`saveState()` 当前会保存：
+
+- 宠物属性：`hunger`、`happy`、`health`
+- 年龄：`ageMin`、`ageHr`、`ageDay`
+- 阶段：`stage`
+- 是否孵化：`hatched`
+- 控制项：`sound`、`tftBri`、`ledBri`、`neo`
+- 特征值：`tCur`、`tAct`、`tStr`
+
+### 6.12.2 首次启动逻辑
+
+`loadState()` 通过 `prefs.getInt("hunger", -1)` 判断是否首次运行：
+
+- 若不存在，则写入默认属性
+- 随机生成 3 个特征值
+- 立即保存
+
+### 6.12.3 自动保存机制
+
+- 默认间隔：30 秒
+- 在 `logicTick()` 中按 `autoSaveMs` 触发
+
+### 6.12.4 当前实现未持久化的设置
+
+以下设置虽然在 UI 中可修改，但**不会写入 NVS**：
+
+- `autoSleep`
+- `autoSaveMs`
+
+也就是说，这两项在重启后会回到代码默认值。
+
+---
+
+## 7. UI 架构与渲染系统
+
+## 7.1 `ui.h`：主逻辑与 UI 的共享边界
+
+`ui.h` 的价值不在于复杂逻辑，而在于建立清晰的跨文件契约：
+
+- 所有 UI 所需的状态都由这里 `extern`
+- 所有与页面相关的枚举也都由这里统一定义
+- `ui.cpp` 与 `TamaFi.ino` 的耦合点几乎都集中在这里
+
+这使得 UI 层虽然依赖全局变量，但接口边界相对明确。
+
+## 7.2 `ui.cpp`：以页面函数为中心的渲染模块
+
+`ui.cpp` 采用“每个页面一个静态函数”的写法，结构直观。
+
+### 7.2.1 页面函数
+
+- `screenBoot()`
+- `screenHatch()`
+- `screenHome()`
+- `screenMenu()`
+- `screenPetStatus()`
+- `screenEnvironment()`
+- `screenSysInfo()`
+- `screenControls()`
+- `screenSettings()`
+- `screenDiagnostics()`
+- `screenGameOver()`
+
+### 7.2.2 顶层调度
+
+`uiDrawScreen(...)` 根据 `currentScreen` 分发到具体页面渲染函数。
+
+### 7.2.3 页面切换回调
+
+`uiOnScreenChange()` 负责：
+
+- 重置菜单高亮条位置
+- 重置设置页高亮条位置
+- 在进入孵化页时清理孵化相关帧索引
+
+---
+
+## 7.3 渲染方式
+
+项目使用多个 `TFT_eSprite`：
+
+- `fb`：主帧缓冲
+- `petSprite`：宠物绘制缓冲
+- `effectSprite`：特效绘制缓冲
+
+总体流程：
+
+```text
+先绘制到 sprite
+  ├─ fb 画背景、文本、状态条
+  ├─ petSprite 画宠物或蛋
+  └─ effectSprite 画饥饿特效
+最后统一 pushSprite 到屏幕
+```
+
+这种方式避免了直接在 TFT 上多次分散绘制造成的明显闪烁。
+
+### 7.3.1 `HOME` 页面图层关系
+
+1. 顶部标题栏
+2. 背景图
+3. 宠物/蛋/攻击动画
+4. 状态条
+5. 文本信息（Mood、Stage、Activity）
+6. 饥饿特效叠加层
+
+### 7.3.2 动画资源映射
+
+当前资源组织有一个很重要的实现事实：
+
+- `StoneGolem.h` 不只包含宠物 idle，还包含：
+  - `idle_1 ~ idle_4`
+  - `egg_hatch_1 ~ egg_hatch_5`
+  - `dead_1 ~ dead_3`
+  - `attack_0 ~ attack_2`
+- `egg_hatch.h` 主要承载的是蛋待机动画：
+  - `egg_hatch_11`
+  - `egg_hatch_21`
+  - `egg_hatch_31`
+  - `egg_hatch_41`
+  - `egg_hatch_51`
+- `effect.h` 主要承载：
+  - `hunger1 ~ hunger4`
+  - `rip_ms`
+- `background.h` 当前可见：
+  - `backgroundImage`
+  - `backgroundImage1`
+  - `backgroundImage2`
+
+换言之，素材文件名和实际用途并非严格一一对应，后续维护资源时需要以代码引用关系为准。
+
+---
+
+## 8. 主要业务流程
+
+## 8.1 启动与恢复流程
+
+```text
+setup()
+  ├─ 初始化 LED / 按键 / 屏幕 / Sprite / PWM / WiFi
+  ├─ prefs.begin("tamafi2")
+  ├─ loadState()
+  ├─ 应用背光与 LED 亮度
+  ├─ 初始化各种逻辑计时器
+  ├─ currentScreen = SCREEN_BOOT
+  ├─ uiInit()
+  └─ uiOnScreenChange(SCREEN_BOOT)
+```
+
+启动完成后，系统进入 `BOOT` 页面，并根据是否已孵化决定后续流向：
+
+- 已孵化：进入 `HOME`
+- 未孵化：进入 `HATCH`
+
+在当前主干里，这一步既可以靠按键，也可以靠自动跳转完成。
+
+## 8.2 首次孵化流程
+
+```text
+BOOT
+  └─> HATCH
+       ├─ 未触发时：播放蛋待机动画
+       ├─ 触发后：播放孵化帧序列 + 孵化音效
+       └─ 完成后：hasHatchedOnce = true，进入 HOME
+```
+
+这个流程把“蛋”作为新手引导状态，也承担了正式游戏开始前的仪式感。
+
+## 8.3 正常运行主流程
+
+```text
+HOME
+  ├─ 属性按时间衰减
+  ├─ 年龄持续增长
+  ├─ 心情持续重算
+  ├─ 每隔一段时间自主决策
+  ├─ 若触发 HUNT / DISCOVER 则开始 WiFi 扫描
+  ├─ 若触发 REST 则进入休息状态机
+  └─ UI 持续反映当前行为与状态
+```
+
+## 8.4 捕猎流程
+
+```text
+decideNextActivity()
+  └─ chosen = ACT_HUNT
+       ├─ currentActivity = ACT_HUNT
+       ├─ ledsWifi()
+       ├─ startWifiScan()
+       ├─ logicTick() 中等待扫描完成
+       ├─ resolveHunt()
+       ├─ 更新 pet / 特效 / 音效
+       └─ currentActivity = ACT_NONE
+```
+
+## 8.5 探索流程
+
+```text
+decideNextActivity()
+  └─ chosen = ACT_DISCOVER
+       ├─ currentActivity = ACT_DISCOVER
+       ├─ startWifiScan()
+       ├─ 等待扫描完成
+       ├─ resolveDiscover()
+       └─ currentActivity = ACT_NONE
+```
+
+## 8.6 休息流程
+
+```text
+decideNextActivity()
+  └─ chosen = ACT_REST
+       ├─ REST_ENTER
+       ├─ REST_DEEP（中点恢复属性）
+       ├─ REST_WAKE
+       └─ ACT_NONE
+```
+
+## 8.7 死亡与重开流程
+
+```text
+logicTick()
+  └─ 三项属性都为 0
+       ├─ SCREEN_GAMEOVER
+       ├─ 播放死亡表现
+       └─ 等待 OK 重启 / 或重新进入孵化流程
+```
+
+## 8.8 控制与设置流程
+
+### Controls 页
+
+可修改：
+
+- 屏幕亮度
+- LED 亮度
+- 声音开关
+- NeoPixel 开关
+
+其中亮度与声音/灯开关会写入持久化。
+
+### Settings 页
+
+可修改：
+
+- Theme（当前只有占位）
+- Auto Sleep（当前无实际逻辑）
+- Auto Save（仅影响当前运行期）
+- Reset Pet
+- Reset All
+
+---
+
+## 9. 数据流向说明
+
+## 9.1 环境数据流
+
+```text
+WiFi 扫描结果
+  └─> checkWifiScanDone()
+       └─> wifiStats
+            ├─> updateMood()
+            ├─> decideNextActivity()
+            ├─> resolveHunt()
+            ├─> resolveDiscover()
+            └─> screenEnvironment()
+```
+
+## 9.2 宠物状态流
+
+```text
+pet（hunger / happiness / health / age）
+  ├─> updateMood()
+  ├─> updateEvolution()
+  ├─> decideNextActivity()
+  ├─> screenHome()
+  ├─> screenPetStatus()
+  └─> 死亡判定
+```
+
+## 9.3 设置数据流
+
+```text
+handleButtons()
+  └─ 修改设置变量
+       ├─ applyTftBrightness()
+       ├─ applyLedBrightness()
+       ├─ saveState()（部分设置）
+       └─ UI 页面实时显示
+```
+
+## 9.4 渲染数据流
+
+```text
+全局共享状态
+  └─> uiDrawScreen()
+       └─> 各 screenXxx()
+            └─> fb / petSprite / effectSprite
+                 └─> pushSprite 到 TFT
+```
+
+---
+
+## 10. 资源与硬件配置说明
+
+## 10.1 动画时间常量 `ui_anim.h`
+
+该文件集中定义：
+
+- 蛋待机动画节拍
+- 孵化节拍
+- 宠物 idle 快慢速
+- 饥饿特效节拍
+- 睡眠进入/唤醒节拍
+- 死亡节拍
+- 菜单高亮动画节拍
+
+这样做的好处是：
+
+- UI 表现参数集中可调
+- 行为逻辑与表现速度解耦
+
+## 10.2 `User_Setup.h` 的现实意义
+
+当前主干中的 `User_Setup.h` 使用的是**当前工作副本对应的面包板/原型接线**，核心参数包括：
+
+- 驱动：`ST7789_DRIVER`
+- 分辨率：`240x240`
+- `TFT_MISO = 6`
+- `TFT_MOSI = 17`
+- `TFT_SCLK = 18`
+- `TFT_CS = 16`
+- `TFT_DC = 15`
+- `TFT_RST = 4`
+
+这与一些旧文档中提到的引脚并不一致。因此后续开发应以**当前 `User_Setup.h` 和实际接线**为准，而不是以历史说明为准。
+
+---
+
+## 11. 当前实现中的重要观察与维护提示
+
+以下内容不是“设计意图”，而是**根据当前代码观察到的真实实现状态**：
+
+### 11.1 原型适配逻辑已进入主干
+
+`loop()` 里明确写了：
+
+- `BOOT` 自动跳转
+- `HATCH` 自动触发孵化
+
+这说明当前主干已经包含“无按键也能跑通”的原型机逻辑。
+
+### 11.2 `traitActivity` 尚未真正参与行为系统
+
+它会：
+
+- 被随机生成
+- 被保存/读取
+- 被状态页显示
+
+但当前不会影响：
+
+- 决策间隔
+- 欲望评分
+- 动画速度
+
+### 11.3 `autoSleep` 是设置占位
+
+当前只存在于：
+
+- 全局变量
+- 设置页切换
+- 设置页显示
+
+但没有任何地方消费它来驱动真实睡眠或息屏逻辑。
+
+### 11.4 `autoSaveMs` 可运行期修改，但不会持久化
+
+用户在设置页里改完自动保存间隔后：
+
+- 当前运行期生效
+- 重启后恢复默认 `30000 ms`
+
+### 11.5 “全量重置”实现并不彻底
+
+`resetPet(true)` 只会重置：
+
+- `pet.ageMinutes`
+
+不会同步清空：
+
+- `pet.ageHours`
+- `pet.ageDays`
+
+如果未来要把重置做严谨，这里需要补齐。
+
+### 11.6 文案与行为并非完全一致
+
+例如：
+
+- `screenBoot()` 文案是 “Press any button...”，但实际可能自动跳过
+- `screenHatch()` 也可自动进入孵化
+
+因此测试与验收时，建议同时检查**UI 文案、逻辑实现、硬件接法**三者是否一致。
+
+### 11.7 素材命名和代码引用关系存在历史包袱
+
+例如孵化相关帧既分散在 `StoneGolem.h`，也分散在 `egg_hatch.h`。维护资源时不要只凭文件名猜用途，应以 `ui.cpp` 的引用关系为准。
+
+---
+
+## 12. 给后续开发者的接手建议
+
+### 12.1 建议优先阅读顺序
+
+1. `TamaFi/TamaFi.ino`
+2. `TamaFi/ui.h`
+3. `TamaFi/ui.cpp`
+4. `TamaFi/ui_anim.h`
+5. `User_Setup.h`
+6. 资源头文件（按 `ui.cpp` 引用关系阅读）
+
+### 12.2 如果要继续演进功能，建议优先处理的点
+
+- 把 `autoSleep` 做成真正可执行的逻辑
+- 让 `traitActivity` 参与决策频率或评分
+- 修正进化判定使用的时间基准
+- 修正 `resetPet(true)` 的年龄重置不完整问题
+- 清理历史文档与当前代码的引脚配置差异
+- 进一步收敛资源文件的命名与归属
+
+---
+
+## 13. 结论
+
+`TamaFi` 的主干代码虽然体量不大，但已经具备了一个完整嵌入式宠物系统的关键要素：
+
+- 明确的页面状态机
+- 非阻塞式运行循环
+- 基于环境感知的行为系统
+- 宠物属性、情绪、进化、休息等核心玩法闭环
+- 完整的显示、音效、灯效与存档支持
+
+它的核心设计特点不是“复杂算法”，而是**把 WiFi 环境扫描映射成宠物生存行为，并通过轻量状态机把输入、决策、反馈和 UI 串成闭环**。这使得项目非常适合作为后续扩展的基础：既可以继续增强 AI/成长系统，也可以继续完善交互、硬件和美术表现。
