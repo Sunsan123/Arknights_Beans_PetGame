@@ -8,6 +8,9 @@
 #include "effect.h"
 #include "background.h"
 
+int petPosX = 120;
+int petPosY = 90;
+
 static const int TFT_W = 240;
 static const int TFT_H = 240;
 static const int PET_W = 115;
@@ -199,7 +202,7 @@ static void screenBoot() {
 // HATCH SCREEN (Idle egg → OK → hatch → home)
 // ---------------------------------------------------------------------------
 static void screenHatch() {
-    ledcWriteTone(5, 0);
+    sndStop();
     fb.fillSprite(TFT_BLACK);
     drawHeader("Hatching...");
 
